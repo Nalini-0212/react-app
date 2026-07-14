@@ -1,72 +1,256 @@
 pipeline {
+
     agent any
-    
+
+    tools {
+        nodejs 'nodejs'
+    }
+
     environment {
-        IMAGE_NAME = 'sample-react'
-        TAG = "${env.BUILD_NUMBER}"
-        USER = 'narasimhaswamy76'
+        SONAR_SCANNER = tool('sonar')
+
+        ECR_REPO_NAME = "react-app"
+        IMAGE_TAG = "${BUILD_NUMBER}"
+
+        ACCOUNT_ID = "123456789012"
+        AWS_REGION = "ap-south-1"
+
+        CLUSTER_NAME = "my-eks-cluster"
+        NAMESPACE = "react-app"
     }
 
     stages {
+
         stage('Checkout Code') {
             steps {
-                git url: 'https://github.com/Narasimha76/Task7.git', branch: 'main'
+                echo "Checking out source code..."
+
+                git branch: 'main',
+                    url: 'https://github.com/Nalini-0212/react-app.git'
             }
         }
+
+        stage('Install Dependencies') {
+            steps {
+                echo "Installing dependencies..."
+                sh 'npm install'
+            }
+        }
+
+        stage('Unit Test') {
+            steps {
+                echo "Running unit tests..."
+                sh 'npm test -- --watchAll=false'
+            }
+        }
+
+        stage('Trivy File System Scan') {
+            steps {
+                echo "Running Trivy filesystem scan..."
+
+                sh '''
+                trivy fs . \
+                --severity HIGH,CRITICAL
+                '''
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+
+                withSonarQubeEnv('sonarserver') {
+
+                    sh """
+                    ${SONAR_SCANNER}/bin/sonar-scanner \
+                    -Dsonar.projectKey=react-app \
+                    -Dsonar.projectName=react-app \
+                    -Dsonar.projectVersion=1.0 \
+                    -Dsonar.sources=src
+                    """
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+
+                timeout(time: 2, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+
+            }
+        }
+
+        stage('Build React Application') {
+            steps {
+
+                echo "Building React application..."
+
+                sh '''
+                npm run build
+                '''
+            }
+        }
+
         stage('Build Docker Image') {
             steps {
-                script {
-                    // Verify the Dockerfile exists
-                    sh 'ls -l'
-                    // Build the Docker image
-                    sh 'docker build -t my-react-app .'
+
+                echo "Building Docker image..."
+
+                sh """
+                docker build -t ${ECR_REPO_NAME}:${IMAGE_TAG} .
+                """
+
+                sh 'docker images'
+            }
+        }
+
+        stage('Trivy Image Scan') {
+            steps {
+
+                echo "Running Trivy image scan..."
+
+                sh """
+                trivy image \
+                --severity HIGH,CRITICAL \
+                ${ECR_REPO_NAME}:${IMAGE_TAG}
+                """
+            }
+        }
+
+        stage('Login to Amazon ECR') {
+            steps {
+
+                withCredentials([
+                    [
+                        \$class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-creds'
+                    ]
+                ]) {
+
+                    sh """
+                    aws sts get-caller-identity
+
+                    aws ecr get-login-password \
+                    --region ${AWS_REGION} | \
+                    docker login \
+                    --username AWS \
+                    --password-stdin \
+                    ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                    """
                 }
             }
         }
-        stage('Debug') {
+
+        stage('Push Docker Image to ECR') {
             steps {
-                script {
-                    // Debug Docker configuration
-                    sh 'docker info'
-                    sh 'docker --version'
-                    sh 'curl -I https://index.docker.io'
+
+                echo "Tagging Docker image..."
+
+                sh """
+                docker tag ${ECR_REPO_NAME}:${IMAGE_TAG} \
+                ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}
+                """
+
+                echo "Pushing image to ECR..."
+
+                sh """
+                docker push \
+                ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}
+                """
+            }
+        }
+
+        stage('Configure EKS Cluster') {
+            steps {
+
+                withCredentials([
+                    [
+                        \$class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-creds'
+                    ]
+                ]) {
+
+                    sh """
+                    aws eks update-kubeconfig \
+                    --region ${AWS_REGION} \
+                    --name ${CLUSTER_NAME}
+
+                    kubectl get nodes
+                    """
                 }
             }
         }
-        stage('Push to Docker Hub') {
+
+        stage('Deploy Kubernetes Resources') {
             steps {
-                script {
-                      echo "========executing Build react Images========"
-                            withCredentials([usernamePassword(credentialsId: 'dockerhub', passwordVariable: 'dockerHubPassword', usernameVariable: 'dockerHubUser')]) {
-                            sh "docker login -u ${env.dockerHubUser} -p ${env.dockerHubPassword}"
-                            sh "docker build -t ${IMAGE_NAME}:${TAG} ."
-                            sh "docker tag ${IMAGE_NAME}:${TAG} $dockerHubUser/${IMAGE_NAME}:${TAG}"
-                            sh "docker push $dockerHubUser/${IMAGE_NAME}:${TAG}"
-                            }
-                    
 
+                echo "Deploying Kubernetes manifests..."
 
-                }
+                sh """
+                kubectl apply -f Kubernetes/namespace.yml
+                kubectl apply -f Kubernetes/deployment.yml
+                kubectl apply -f Kubernetes/service.yml
+                """
             }
         }
-        
-        stage('update-kubectl-image') {
+
+        stage('Update Deployment Image') {
             steps {
-                script {
-                       echo "=======update EKS Image========"
-                            
-                       sh "kubectl"
-                       sh "cd Kubernetes"
-                       sh "ls"
-                       sh """
-                            sed -i 's|$USER/${IMAGE_NAME}:.*|$USER/${IMAGE_NAME}:${TAG}|' Kubernetes/react-app-deployment.yaml
-                            kubectl apply -f Kubernetes/react-app-deployment.yaml
-                            kubectl apply -f Kubernetes/service.yaml
-                        """
 
+                echo "Updating deployment image..."
 
-                }
+                sh """
+                kubectl set image deployment/react-app-deployment \
+                react-app=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG} \
+                -n ${NAMESPACE}
+                """
             }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+
+                echo "Checking rollout status..."
+
+                sh """
+                kubectl rollout status deployment/react-app-deployment \
+                -n ${NAMESPACE} \
+                --timeout=5m
+                """
+
+                echo "Verifying resources..."
+
+                sh """
+                kubectl get deployment -n ${NAMESPACE}
+                kubectl get pods -n ${NAMESPACE}
+                kubectl get svc -n ${NAMESPACE}
+
+                kubectl describe deployment react-app-deployment \
+                -n ${NAMESPACE}
+
+                kubectl get svc react-app-service \
+                -n ${NAMESPACE}
+
+                kubectl describe svc react-app-service \
+                -n ${NAMESPACE}
+                """
+            }
+        }
+    }
+
+    post {
+
+        success {
+            echo "✅ Application deployed successfully to EKS."
+        }
+
+        failure {
+            echo "❌ Pipeline failed."
+        }
+
+        always {
+            cleanWs()
         }
     }
 }
