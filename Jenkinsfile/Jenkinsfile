@@ -11,13 +11,13 @@ pipeline {
         SONAR_SCANNER = tool('sonar')
 
         ECR_REPO_NAME = "react-app"
-        IMAGE_TAG = "${BUILD_NUMBER}"
+        IMAGE_TAG     = "${BUILD_NUMBER}"
 
         ACCOUNT_ID = "623740184460"
         AWS_REGION = "ap-south-1"
 
         CLUSTER_NAME = "react-eks-cluster"
-        NAMESPACE = "react-app"
+        NAMESPACE    = "react-app"
     }
 
     stages {
@@ -41,7 +41,7 @@ pipeline {
         stage('Unit Test') {
             steps {
                 echo "Running unit tests..."
-                sh 'npm test -- --watchAll=false'
+                sh 'CI=true npm test -- --watchAll=false'
             }
         }
 
@@ -63,7 +63,7 @@ pipeline {
 
                     sh """
                     export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
-                    export PATH=$JAVA_HOME/bin:$PATH
+                    export PATH=\$JAVA_HOME/bin:\$PATH
 
                     java -version
 
@@ -191,56 +191,80 @@ pipeline {
         stage('Deploy Kubernetes Resources') {
             steps {
 
-                echo "Deploying Kubernetes manifests..."
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-creds'
+                    ]
+                ]) {
 
-                sh """
-                kubectl apply -f Kubernetes/namespace.yml
-                kubectl apply -f Kubernetes/deployment.yml
-                kubectl apply -f Kubernetes/service.yml
-                """
+                    echo "Deploying Kubernetes manifests..."
+
+                    sh """
+                    kubectl apply -f Kubernetes/namespace.yml
+                    kubectl apply -f Kubernetes/deployment.yml
+                    kubectl apply -f Kubernetes/service.yml
+                    """
+                }
             }
         }
 
         stage('Update Deployment Image') {
             steps {
 
-                echo "Updating deployment image..."
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-creds'
+                    ]
+                ]) {
 
-                sh """
-                kubectl set image deployment/react-app-deployment \
-                react-app=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG} \
-                -n ${NAMESPACE}
-                """
+                    echo "Updating deployment image..."
+
+                    sh """
+                    kubectl set image deployment/react-app-deployment \
+                    react-app=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG} \
+                    -n ${NAMESPACE}
+                    """
+                }
             }
         }
 
         stage('Verify Deployment') {
             steps {
 
-                echo "Checking rollout status..."
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-creds'
+                    ]
+                ]) {
 
-                sh """
-                kubectl rollout status deployment/react-app-deployment \
-                -n ${NAMESPACE} \
-                --timeout=5m
-                """
+                    echo "Checking rollout status..."
 
-                echo "Verifying resources..."
+                    sh """
+                    kubectl rollout status deployment/react-app-deployment \
+                    -n ${NAMESPACE} \
+                    --timeout=5m
+                    """
 
-                sh """
-                kubectl get deployment -n ${NAMESPACE}
-                kubectl get pods -n ${NAMESPACE}
-                kubectl get svc -n ${NAMESPACE}
+                    echo "Verifying resources..."
 
-                kubectl describe deployment react-app-deployment \
-                -n ${NAMESPACE}
+                    sh """
+                    kubectl get deployment -n ${NAMESPACE}
+                    kubectl get pods -n ${NAMESPACE}
+                    kubectl get svc -n ${NAMESPACE}
 
-                kubectl get svc react-app-service \
-                -n ${NAMESPACE}
+                    kubectl describe deployment react-app-deployment \
+                    -n ${NAMESPACE}
 
-                kubectl describe svc react-app-service \
-                -n ${NAMESPACE}
-                """
+                    kubectl get svc react-app-service \
+                    -n ${NAMESPACE}
+
+                    kubectl describe svc react-app-service \
+                    -n ${NAMESPACE}
+                    """
+                }
             }
         }
     }
