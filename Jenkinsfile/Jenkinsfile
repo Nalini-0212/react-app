@@ -12,10 +12,10 @@ pipeline {
         ECR_REPO_NAME = "react-app"
         IMAGE_TAG = "${BUILD_NUMBER}"
 
-        ACCOUNT_ID = "123456789012"
+        ACCOUNT_ID = "623740184460"
         AWS_REGION = "ap-south-1"
 
-        CLUSTER_NAME = "my-eks-cluster"
+        CLUSTER_NAME = "react-eks-cluster"
         NAMESPACE = "react-app"
     }
 
